@@ -22,7 +22,7 @@
  *  1.1.0       2020-06-03      Additional functionality for aux, temperature range, and heat modes
  *  1.1.1       2020-07-26      Adjusted icons to better match functionality for aux, temperature range and heat modes
  *                              and removed duplicate tile declaration
- *  1.1.2       2020-09-17      Modified / validated to work on Hubitat
+ *  1.1.2b      2020-09-17      Modified / validated to work on Hubitat
  *
  */
 
@@ -44,15 +44,19 @@
  81 - HeatMode
  */
 
+import groovy.transform.Field
 import groovy.time.TimeCategory
 
+@Field static int LOG_LEVEL = 5
+
 metadata {
-    definition (name: "BWA Spa", namespace: "rpowell", author: "Richard Powell") {
+    definition (name: "BWA Spa", namespace: "richardpowellus", author: "Richard Powell") {
         capability "Actuator"
-        capability "Temperature Measurement"
-        capability "Thermostat Heating Setpoint"
-        capability "Thermostat Mode"
-        capability "Thermostat Operating State"
+        capability "Thermostat"
+        capability "TemperatureMeasurement"
+        capability "ThermostatHeatingSetpoint"
+        capability "ThermostatMode"
+        capability "ThermostatOperatingState"
         capability "Refresh"
         capability "Sensor"
         capability "Switch"
@@ -86,7 +90,12 @@ metadata {
         attribute "__v", "string"
         attribute "active", "string"
         attribute "created_at", "string"
-        attribute "_id", "string"        
+        attribute "_id", "string"
+        
+        attribute "supportedThermostatFanModes", "enum"
+        attribute "supportedThermostatModes", "enum"
+        attribute "thermostatOperatingState", "string"
+        attribute "thermostatFanMode", "string"
         
         command "toggleSwitch"
         command "togglePump1"
@@ -247,6 +256,37 @@ metadata {
     }
 }
 
+@Field static List<String> supportedThermostatModes = ["off", "heat"]
+@Field static List<String> supportedThermostatFanModes = ["circulate"]
+
+@Field static List<String> thermostatFanMode = ["circulate"]
+
+def logMessage(level, message) {
+    if (level >= LOG_LEVEL) {
+        if (level < 3) {
+            log.debug message
+        } else {
+            log.info message
+        }
+    }
+}
+
+def configure() {
+    if (!state.initialized) {
+        initializeVars()
+    }
+}
+
+// first run only
+void initializeVars() {
+    sendEvent(name:"supportedThermostatModes", value: supportedThermostatModes.toString().replaceAll(/"/,""), isStateChange: true)
+    sendEvent(name:"supportedThermostatFanModes", value: supportedThermostatFanModes.toString().replaceAll(/"/,""), isStateChange: true)
+    
+    sendEvent(name:"thermostatFanMode", value: thermostatFanMode.toString().replaceAll(/"/,""), isStateChange: true)
+    
+    state.initialized = true
+}
+
 def installed() {
 }
 
@@ -394,6 +434,17 @@ def toggleHeatMode() {
 def setHeatingSetpoint(setpoint) {
 	sendCommand("SetTemp", device.currentValue("temperatureScale") == "C" ? setpoint * 2 : setpoint)
     sendEvent(name: "heatingSetpoint", value: setpoint)
+}
+
+def setThermostatMode(mode) {
+    switch (mode) {
+        case "heat":
+            sendEvent(name: "thermostatMode", value: "heat")
+    }
+}
+
+def heat() {
+    setThermostatMode("heat")
 }
 
 def sendCommand(action, data) {
@@ -604,40 +655,40 @@ def parsePanelData(encodedData) {
     	targetTemperature /= 2.0F
     }
     
-	/*log.info ("Message Length: ${messageLength}\n"
-           + "Actual Temperature: ${actualTemperature}\n"
-           + "Current Time Hour: ${currentTimeHour}\n"
-           + "Current Time Minute: ${currentTimeMinute}\n"
-           + "Is 24-Hour Time: ${is24HourTime}\n"
-           + "Temperature Scale: ${temperatureScale}\n"
-           + "Target Temperature: ${targetTemperature}\n"
-           + "Filter Mode: ${filterMode}\n"
-           + "Accessibility Type: ${accessibilityType}\n"
-           + "Temperature Range: ${temperatureRange}\n"
-           + "Light-1 On: ${light1On}\n"
-           + "Light-2 On: ${light2On}\n"
-           + "Heat Mode: ${heatMode}\n"
-           + "Is Heating: ${isHeating}\n"
-           + "pump1State: ${pump1State}\n"
-           + "pump2State: ${pump2State}\n"
-           + "pump3State: ${pump3State}\n"
-           + "pump4State: ${pump4State}\n"
-           + "pump5State: ${pump5State}\n"
-           + "pump6State: ${pump6State}\n"
-           + "blowerState: ${blowerState}\n"
-           + "misterOn: ${misterOn}\n"
-           + "aux1On: ${aux1On}\n"
-           + "aux2On: ${aux2On}\n"
-           + "pumpStateStatus: ${pumpStateStatus}\n"
-           + "wifiState: ${wifiState}\n"
-    )*/
+	logMessage(2, "Message Length: ${messageLength}\n"
+                + "Actual Temperature: ${actualTemperature}\n"
+                + "Current Time Hour: ${currentTimeHour}\n"
+                + "Current Time Minute: ${currentTimeMinute}\n"
+                + "Is 24-Hour Time: ${is24HourTime}\n"
+                + "Temperature Scale: ${temperatureScale}\n"
+                + "Target Temperature: ${targetTemperature}\n"
+                + "Filter Mode: ${filterMode}\n"
+                + "Accessibility Type: ${accessibilityType}\n"
+                + "Temperature Range: ${temperatureRange}\n"
+                + "Light-1 On: ${light1On}\n"
+                + "Light-2 On: ${light2On}\n"
+                + "Heat Mode: ${heatMode}\n"
+                + "Is Heating: ${isHeating}\n"
+                + "pump1State: ${pump1State}\n"
+                + "pump2State: ${pump2State}\n"
+                + "pump3State: ${pump3State}\n"
+                + "pump4State: ${pump4State}\n"
+                + "pump5State: ${pump5State}\n"
+                + "pump6State: ${pump6State}\n"
+                + "blowerState: ${blowerState}\n"
+                + "misterOn: ${misterOn}\n"
+                + "aux1On: ${aux1On}\n"
+                + "aux2On: ${aux2On}\n"
+                + "pumpStateStatus: ${pumpStateStatus}\n"
+                + "wifiState: ${wifiState}\n"
+    )
     
     sendEvent(name: "switch", value: (pump1State == "off" && pump2State == "off" && pump3State == "off" && pump4State == "off" && pump5State == "off" && pump6State == "off") ? "off" : "on")
     sendEvent(name: "temperatureScale", value: temperatureScale)
     sendEvent(name: "temperature", value: actualTemperature, unit: temperatureScale)
     sendEvent(name: "heatingSetpoint", value: targetTemperature, unit: temperatureScale)
-    sendEvent(name: "thermostatMode", value: isHeating ? "heat" : "auto")
-    sendEvent(name: "thermostatOperatingMode", value: isHeating ? "heating" : "idle")
+    sendEvent(name: "thermostatMode", value: isHeating ? "heat" : "off")
+    sendEvent(name: "thermostatOperatingState", value: isHeating ? "heating" : "idle")
     sendEvent(name: "pump1", value: pump1State)
     sendEvent(name: "pump2", value: pump2State)
     sendEvent(name: "pump3", value: pump3State)

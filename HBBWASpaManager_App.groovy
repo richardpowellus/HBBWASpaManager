@@ -18,13 +18,17 @@
  *  VERSION     DATE            NOTES
  *  0.9.0       2020-01-30      Initial release with basic access and control of spas
  *  1.0.0       2020-01-31      Updated icons and bumped version to match DTH version
- *  1.0.1       2020-09-17      Modified to now work with Hubitat
+ *  1.0.1b      2020-09-17      Modified to now work with Hubitat
  *
  */
 
+import groovy.transform.Field
+
+@Field static int LOG_LEVEL = 5
+
 definition(
     name: "BWA Spa Manager",
-    namespace: "rpowell",
+    namespace: "richardpowellus",
     author: "Richard Powell",
     description: "Access and control your BWA Spa.",
     category: "Health & Wellness",
@@ -41,13 +45,23 @@ preferences {
     page(name: "authResultPage")
 }
 
+def logMessage(level, message) {
+    if (level >= LOG_LEVEL) {
+        if (level < 3) {
+            log.debug message
+        } else {
+            log.info message
+        }
+    }
+}
+
 def mainPage() {
         def spas = [:]
         // Get spas if we don't have them already
         if ((state.spas?.size()?:0) == 0 && state.token?.trim()) {
             getSpas()
         }
-        log.info state.spas
+        logMessage(3, state.spas)
         if (state.spas) {
             spas = state.spas
             spas.sort { it.value }
@@ -81,10 +95,10 @@ def authPage() {
 }
 
 def authResultPage() {
-    log.info "Attempting login with specified credentials..."
+    logMessage(3, "Attempting login with specified credentials...")
     
     doLogin()
-    log.info state.loginResponse
+    logMessage(3, state.loginResponse)
     
     // Check if login was successful
     if (state.token == null) {
@@ -128,7 +142,7 @@ boolean doLogin(){
             cacheSpas(resp.data.device)
             break
         default:
-            log.debug resp.data
+            logMessage(2, resp.data)
             state.loginResponse = "Login unsuccessful"
             state.credentialStatus = "[Disconnected]"
             state.token = null
@@ -168,7 +182,7 @@ def doCallout(calloutMethod, urlPath, calloutBody, contentType) {
 }
 
 def doCallout(calloutMethod, urlPath, calloutBody, contentType, queryParams) {
-    log.info "\"${calloutMethod}\"-ing ${contentType} to \"${urlPath}\""
+    logMessage(3, "\"${calloutMethod}\"-ing ${contentType} to \"${urlPath}\"")
     def content_type
     switch(contentType) {
         case "xml":
@@ -245,8 +259,9 @@ def initialize() {
         try {
             def childDevice = getChildDevice(deviceId)
             if(!childDevice) {
-                log.info "Adding device: ${state.spas[deviceId]} [${deviceId}]"
-                childDevice = addChildDevice("rpowell", "BWA Spa", deviceId, [label: state.spas[deviceId]])
+                logMessage(4, "Adding device: ${state.spas[deviceId]} [${deviceId}]")
+                childDevice = addChildDevice("richardpowellus", "BWA Spa", deviceId, [label: state.spas[deviceId]])
+                childDevice.configure()
                 childDevice.parseDeviceData(state.device)
             }
             childDevices.add(childDevice)
@@ -263,7 +278,7 @@ def initialize() {
 }
 
 def pollChildren() {
-    log.info "polling..."
+    logMessage(3, "polling...")
     def devices = getChildDevices()
     devices.each {
         def deviceData = getPanelUpdate(it.currentValue("device_id"))
@@ -273,7 +288,7 @@ def pollChildren() {
 
 // Get panel update
 def getPanelUpdate(device_id) {
-    log.info "getting panel update for ${device_id}"
+    logMessage(3, "getting panel update for ${device_id}")
     def resp = doCallout("POST", "/devices/sci", getXmlRequest(device_id, "PanelUpdate"), "xml")
     resp.data
 }
@@ -283,7 +298,7 @@ def getXmlRequest(deviceId, fileName) {
 }
 
 def sendCommand(deviceId, targetName, data) {
-    log.info "sending ${targetName}:${data} command for ${deviceId}"
+    logMessage(3, "sending ${targetName}:${data} command for ${deviceId}")
     def resp = doCallout("POST", "/devices/sci", getXmlRequest(deviceId, targetName, data), "xml")
     resp.data
 }
