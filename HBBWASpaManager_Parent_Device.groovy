@@ -23,7 +23,8 @@
  *  1.1.1       2020-07-26      Adjusted icons to better match functionality for aux, temperature range and heat modes
  *                              and removed duplicate tile declaration
  *  1.1.2b      2020-09-17      Modified / validated to work on Hubitat
- *  1.1.3
+ *  1.1.3       2020-10-11      Major rewrite of this driver to work with Hubitat's Parent-Child device driver model
+ *  1.1.4       2020-10-11      Support the remaining device types except Blower, more code clean-up
  *
  */
 
@@ -113,7 +114,7 @@ def off() {
 }
 
 def sendCommand(action, data) {
-	parent.sendCommand(device.currentValue("deviceId"), action, data)
+    parent.sendCommand(device.currentValue("deviceId"), action, data)
     runIn(2, refresh)
 }
 
@@ -126,6 +127,16 @@ def parseDeviceData(Map results) {
 def createChildDevices(spaConfiguration) {
     // Thermostat
     fetchChild(true, "Thermostat", "Thermostat")
+ 
+    /* The incoming spaConfiguration has a list of all the possible add-on devices like
+       pumps, lights, etc. mapped to a boolean indicating whether or not this particular
+       hot tub actually has that specific device installed on it.
+
+       Iterate through all the possible add-on devices and if the hot tub we're working
+       with actually has that device installed on it then we will go ahead and create a
+       child device for it (passing "true" as the first parameter to fetchChild(...) will
+       have it go and create a device if it doesn't exist already.
+    */
     
     // Pumps
     spaConfiguration.each { k, v ->
@@ -142,146 +153,187 @@ def createChildDevices(spaConfiguration) {
             fetchChild(true, "Switch", "Light ${lightNumber}", LIGHT_BUTTON_MAP[lightNumber])
         }
     }
+    
+    // Blower
+    if (spaConfiguration["Blower"] == true) {
+        // TODO: Support Blower properly. It's not a "Switch" device type.
+        //fetchChild(true, ???, "Blower", BUTTON_MAP.Blower)
+    }
+    
+    // Aux
+    spaConfiguration.each { k, v ->
+        if (k.startsWith("Aux") && v == true) {
+            def lightNumber = k[3].toInteger()
+            fetchChild(true, "Switch", "Aux ${lightNumber}", AUX_BUTTON_MAP[lightNumber])
+        }
+    }
+    
+    // Mister
+    if (spaConfiguration["Mister"] == true) {
+        fetchChild(true, "Switch", "Mister", BUTTON_MAP.Mister)
+    }
 }
 
 def parsePanelData(encodedData) {
     byte[] decoded = encodedData.decodeBase64()
+
+    def is24HourTime = (decoded[13] & 2) != 0 ? true : false
+    def currentTimeHour = decoded[7]
+    def currentTimeMinute = decoded[8]
     
-    def messageLength = new BigInteger(1, decoded[0])
-    def actualTemperature = new BigInteger(1, decoded[6])
-    def currentTimeHour = new BigInteger(1, decoded[7])
-    def currentTimeMinute = new BigInteger(1, decoded[8])
+    def temperatureScale = (decoded[13] & 1) == 0 ? "F" : "C"
+    def actualTemperature = decoded[6]
+    
+    def targetTemperature = decoded[24]
+    def isHeating = (decoded[14] & 48) != 0
+    def heatingMode = (decoded[14] & 4) == 4 ? "high" : "low"
     def heatMode
-    switch (new BigInteger(1, decoded[9])) {
-    	case 0:
-        	heatMode = "ready"
-            break
+    switch (decoded[9]) {
+        case 0:
+            heatMode = "Ready"
+            break;
         case 1:
-        	heatMode = "rest"
-            break
+            heatMode = "Rest"
+            break;
         case 2:
-        	heatMode = "ready in rest"
-            break
+            heatMode = "Ready in Rest"
+            break;
         default:
-        	heatMode = "none"
-            break
+            heatMode = "None"
     }
-    def flag1 = new BigInteger(1, decoded[13])
-    def is24HourTime = (flag1 & 2) != 0
-    def filterMode
-    switch (flag1 & 12) {
+    
+    // Send events to Thermostat child device
+    def thermostatChildDevice = fetchChild(false, "Thermostat", "Thermostat")
+    if (thermostatChildDevice != null) {
+        thermostatChildDevice.sendEventsWithUnits([
+            [name: "temperature", value: actualTemperature, unit: temperatureScale],
+            [name: "heatingSetpoint", value: targetTemperature, unit: temperatureScale]
+        ])
+        thermostatChildDevice.sendEvents([
+            [name: "thermostatMode", value: isHeating ? "heat" : "off"],
+            [name: "thermostatOperatingState", value: isHeating ? "heating" : "idle"],
+        ])
+    }
+      
+    def filtermode
+    switch (decoded[13] & 12) {
         case 4:
-        	filterMode = "1"
-            break
+            filterMode = "Filter 1"
+            break;
         case 8:
-        	filterMode = "2"
-            break
+            filterMode = "Filter 2"
+            break;
         case 12:
-        	filterMode = "1 & 2"
-            break
-    	case 0:
+            filterMode = "Filter 1 & 2"
+            break;
+        case 0:
         default:
-        	filterMode = "off"
-            break
+            filterMode = "Off"
     }
+    
     def accessibilityType
-    switch (flag1 & 48) {
-    	case 16:
-        	accessibilityType = "Pump Light"
-            break
+    switch (decoded[13] & 48) {
+        case 16:
+            accessibilityType = "Pump Light"
+            break;
         case 32:
-        case 48:
-        	accessibilityType = "None"
-            break
+        case 42:
+            accessibilityType = "None"
+            break;
         default:
-        	accessibilityType = "All"
-            break
+            accessibilityType = "All"
     }
-    def temperatureScale = (flag1 & 1) == 0 ? "F" : "C"
-    def flag2 = new BigInteger(1, decoded[14])
-    def temperatureRange = (flag2 & 4) == 4 ? "high" : "low"
-    def isHeating = (flag2 & 48) != 0
-    def flag3 = new BigInteger(1, decoded[15])
     
     // Pumps
     def pumpState = []
     pumpState[0] = null
-    switch (flag3 & 3) {
-        case 1:
-        	pumpState[1] = "low"
-            break
-        case 2:
-        	pumpState[1] = "high"
-            break
-        default:
-        	pumpState[1] = "off"
-            break
+    def pump1ChildDevice = fetchChild(false, "Switch", "Pump 1")
+    if (pump1ChildDevice != null) {
+        switch (decoded[15] & 3) { // Pump 1
+            case 1:
+            	pumpState[1] = "low"
+                break
+            case 2:
+            	pumpState[1] = "high"
+                break
+            default:
+            	pumpState[1] = "off"
+        }
+        pump1ChildDevice.parse(pumpState[1])
     }
-    def pump2State
-    switch (flag3 & 12) {
-        case 4:
-        	pumpState[2] = "low"
-            break
-        case 8:
-        	pumpState[2] = "high"
-            break
-        default:
-        	pumpState[2] = "off"
-            break
+    def pump2ChildDevice = fetchChild(false, "Switch", "Pump 2")
+    if (pump2ChildDevice != null) {
+        switch (decoded[15] & 12) { // Pump 2
+            case 4:
+                pumpState[2] = "low"
+                break
+            case 8:
+                pumpState[2] = "high"
+                break
+            default:
+                pumpState[2] = "off"
+        }
+        pump2ChildDevice.parse(pumpState[2])
     }
-    def pump3State
-    switch (flag3 & 48) {
-        case 16:
-        	pumpState[3] = "low"
-            break
-        case 32:
-        	pumpState[3] = "high"
-            break
-        default:
-        	pumpState[3] = "off"
-            break
+    def pump3ChildDevice = fetchChild(false, "Switch", "Pump 3")
+    if (pump3ChildDevice != null) {
+        switch (decoded[15] & 48) { // Pump 3
+            case 16:
+            	pumpState[3] = "low"
+                break
+            case 32:
+            	pumpState[3] = "high"
+                break
+            default:
+            	pumpState[3] = "off"
+        }
+        pump3ChildDevice.parse(pumpState[3])
     }
-    def pump4State
-    switch (flag3 & 192) {
-        case 64:
-        	pumpState[4] = "low"
-            break
-        case 128:
-        	pumpState[4] = "high"
-            break
-        default:
-        	pumpState[4] = "off"
-            break
+    def pump4ChildDevice = fetchChild(false, "Switch", "Pump 4")
+    if (pump4ChildDevice != null) {
+        switch (decoded[15] & 192) {
+            case 64:
+            	pumpState[4] = "low"
+                break
+            case 128:
+            	pumpState[4] = "high"
+                break
+            default:
+            	pumpState[4] = "off"
+        }
+        pump4ChildDevice.parse(pumpState[4])
     }
-    def flag4 = new BigInteger(1, decoded[16])
-    def pump5State
-    switch (flag4 & 3) {
-        case 1:
-        	pumpState[5] = "low"
-            break
-        case 2:
-        	pumpState[5] = "high"
-            break
-        default:
-        	pumpState[5] = "off"
-            break
+    def pump5ChildDevice = fetchChild(false, "Switch", "Pump 5")
+    if (pump5ChildDevice != null) {
+        switch (decoded[16] & 3) {
+            case 1:
+            	pumpState[5] = "low"
+                break
+            case 2:
+            	pumpState[5] = "high"
+                break
+            default:
+            	pumpState[5] = "off"
+        }
+        pump5ChildDevice.parse(pumpState[5])
     }
-    def pump6State
-    switch (flag4 & 12) {
-        case 4:
-        	pumpState[6] = "low"
-            break
-        case 8:
-        	pumpState[6] = "high"
-            break
-        default:
-        	pumpState[6] = "off"
-            break
+    def pump6ChildDevice = fetchChild(false, "Switch", "Pump 6")
+    if (pump6ChildDevice != null) {
+        switch (decoded[16] & 12) {
+            case 4:
+            	pumpState[6] = "low"
+                break
+            case 8:
+            	pumpState[6] = "high"
+                break
+            default:
+            	pumpState[6] = "off"
+        }
+        pump6ChildDevice.parse(pumpState[6])
     }
     
-    def byte17 = new BigInteger(1, decoded[17])
-    def blowerState
-    switch (byte17 & 12) {
+    // TODO: Support Blower properly. It's not a switch device type
+    switch (decoded[17] & 12) {
         case 4:
         	blowerState = "low"
             break
@@ -293,24 +345,46 @@ def parsePanelData(encodedData) {
             break
         default:
         	blowerState = "off"
-            break
     }
-    def flag6 = new BigInteger(1, decoded[18])
     
     // Lights
     def lightState = []
     lightState[0] = null
-    lightState[1] = (flag6 & 3) != 0
-    lightState[2] = (flag6 & 12) != 0
+    def light1ChildDevice = fetchChild(false, "Switch", "Light 1")
+    if (light1ChildDevice != null) {
+        lightState[1] = (decoded[18] & 3) != 0
+        light1ChildDevice.parse(lightState[1])
+    }
+    def light2ChildDevice = fetchChild(false, "Switch", "Light 2")
+    if (light2ChildDevice != null) {
+        lightState[2] = (decoded[18] & 12) != 0
+        light2ChildDevice.parse(lightState[2])
+    }
     
-    def byte19 = new BigInteger(1, decoded[19])
-    def misterOn = (byte19 & 1) != 0
-    def aux1On = (byte19 & 8) != 0
-    def aux2On = (byte19 & 16) != 0
-    def targetTemperature = new BigInteger(1, decoded[24])
-    def byte26 = new BigInteger(1, decoded[26])
+    // Mister
+    def misterChildDevice = fetchChild(false, "Switch", "Mister")
+    def misterState = null
+    if (misterChildDevice != null) {
+        misterState = (decoded[19] & 1) != 0
+        misterChildDevice.parse(misterState)
+    }
+    
+    // Aux
+    def auxState = []
+    auxState[0] = null
+    def aux1ChildDevice = fetchChild(false, "Switch", "Aux 1")
+    if (aux1ChildDevice != null) {
+        auxState[1] = (decoded[19] & 8) != 0
+        aux1ChildDevice.parse(auxState[1])
+    }
+    def aux2ChildDevice = fetchChild(false, "Switch", "Aux 2")
+    if (aux2ChildDevice != null) {
+        auxState[2] = (decoded[19] & 16) != 0
+        aux2ChildDevice.parse(auxState[2])
+    }
+    
     def wifiState
-    switch (byte26 & 240) {
+    switch (decoded[16] & 240) {
     	case 0:
         	wifiState = "OK"
             break
@@ -330,8 +404,9 @@ def parsePanelData(encodedData) {
         	wifiState = "Panel"
             break
     }
+    
     def pumpStateStatus
-    if (flag3 < 1 && flag4 < 1 && (byte17 & 3) < 1) {
+    if (decoded[15] < 1 && decoded[16] < 1 && (decoded[17] & 3) < 1) {
     	pumpStateStatus = "Off"
     } else {
     	pumpStateStatus = isHeating ? "Low Heat" : "Low"
@@ -346,8 +421,7 @@ def parsePanelData(encodedData) {
     	targetTemperature /= 2.0F
     }
     
-	logMessage(2, "Message Length: ${messageLength}\n"
-                + "Actual Temperature: ${actualTemperature}\n"
+    logMessage(2, "Actual Temperature: ${actualTemperature}\n"
                 + "Current Time Hour: ${currentTimeHour}\n"
                 + "Current Time Minute: ${currentTimeMinute}\n"
                 + "Is 24-Hour Time: ${is24HourTime}\n"
@@ -355,56 +429,25 @@ def parsePanelData(encodedData) {
                 + "Target Temperature: ${targetTemperature}\n"
                 + "Filter Mode: ${filterMode}\n"
                 + "Accessibility Type: ${accessibilityType}\n"
-                + "Temperature Range: ${temperatureRange}\n"
-                + "Light-1 On: ${light1On}\n"
-                + "Light-2 On: ${light2On}\n"
+                + "Heating Mode: ${heatingMode}\n"
+                + "lightState[1]: ${lightState[1]}\n"
+                + "lightState[2]: ${lightState[2]}\n"
                 + "Heat Mode: ${heatMode}\n"
                 + "Is Heating: ${isHeating}\n"
-                + "pump1State: ${pumpState[1]}\n"
-                + "pump2State: ${pumpState[2]}\n"
-                + "pump3State: ${pumpState[3]}\n"
-                + "pump4State: ${pumpState[4]}\n"
-                + "pump5State: ${pumpState[5]}\n"
-                + "pump6State: ${pumpState[6]}\n"
+                + "pumpState[1]: ${pumpState[1]}\n"
+                + "pumpState[2]: ${pumpState[2]}\n"
+                + "pumpState[3]: ${pumpState[3]}\n"
+                + "pumpState[4]: ${pumpState[4]}\n"
+                + "pumpState[5]: ${pumpState[5]}\n"
+                + "pumpState[6]: ${pumpState[6]}\n"
                 + "blowerState: ${blowerState}\n"
-                + "misterOn: ${misterOn}\n"
-                + "aux1On: ${aux1On}\n"
-                + "aux2On: ${aux2On}\n"
+                + "misterState: ${misterState}\n"
+                + "auxState[1]: ${auxState[1]}\n"
+                + "auxState[2]: ${auxState[2]}\n"
                 + "pumpStateStatus: ${pumpStateStatus}\n"
                 + "wifiState: ${wifiState}\n"
     )
     
-    // Send Thermostat Events
-    def thermostat = fetchChild(false, "Thermostat", "Thermostat")
-    thermostat.sendEvents([
-        [name: "thermostatMode", value: isHeating ? "heat" : "off"],
-        [name: "thermostatOperatingState", value: isHeating ? "heating" : "idle"],
-    ])
-    thermostat.sendEventsWithUnits([
-        [name: "temperature", value: actualTemperature, unit: temperatureScale],
-        [name: "heatingSetpoint", value: targetTemperature, unit: temperatureScale]
-    ])
-    
-    // Send Pump Events
-    for (int i = 1; i <= 6; ++i) {
-        def tempPump = fetchChild(false, "Switch", "Pump ${i}")
-        if (tempPump != null) {
-            tempPump.parse(pumpState[i])
-        }
-    }
-    
-    // Send Light Events
-    for (int i = 1; i <= 2; ++i) {
-        def tempLight = fetchChild(false, "Switch", "Light ${i}")
-        if (tempLight != null) {
-            tempLight.parse(lightState[i])
-        }
-    }
-    
-    //sendEvent(name: "blower", value: blowerState)
-    //sendEvent(name: "mister", value: misterOn ? "on" : "off")
-    //sendEvent(name: "aux1", value: aux1On ? "on" : "off")
-    //sendEvent(name: "aux2", value: aux2On ? "on" : "off")
     sendEvent(name: "spaStatus", value: "${heatMode}\n${isHeating ? "heating to ${targetTemperature}°" : "not heating"}")
 }
 
