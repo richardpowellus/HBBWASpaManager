@@ -19,19 +19,16 @@
  *  0.9.0       2020-01-30      Initial release with basic access and control of spas
  *  1.0.0       2020-01-31      Updated icons and bumped version to match DTH version
  *  1.0.1b      2020-09-17      Modified to now work with Hubitat
- *  1.1.0       2020-10-11      Major rewrite: Now downloads hot tub config, supports child devices, major refactoring, etc.
  *
  */
 
 import groovy.transform.Field
 
-@Field static int LOG_LEVEL = 2
-
-@Field static String NAMESPACE = "richardpowellus"
+@Field static int LOG_LEVEL = 5
 
 definition(
     name: "BWA Spa Manager",
-    namespace: NAMESPACE,
+    namespace: "richardpowellus",
     author: "Richard Powell",
     description: "Access and control your BWA Spa.",
     category: "Health & Wellness",
@@ -46,18 +43,7 @@ preferences {
     page(name: "mainPage")
     page(name: "authPage")
     page(name: "authResultPage")
-    page(name: "confirmPage")
 }
-
-@Field static String BWGAPI_API_URL = "https://bwgapi.balboawater.com/"
-@Field static String PARENT_DEVICE_NAME_PREFIX = "HB BPA SPA Parent"
-
-/* Spa Map Key Values
-    "appId"
-    "deviceId"
-    "deviceNetworkId"
-    "deviceDisplayName"
-*/
 
 def logMessage(level, message) {
     if (level >= LOG_LEVEL) {
@@ -69,48 +55,34 @@ def logMessage(level, message) {
     }
 }
 
-def confirmPage() {
-    def spaConfiguration = ParseDeviceConfigurationData(getDeviceConfiguration(state.spa["deviceId"]))
-    logMessage(2, "confirmPage() spaConfiguration.dump(): ${spaConfiguration}")
-    
-    state.spaConfiguration = spaConfiguration
-    
-    dynamicPage(name: "confirmPage", uninstall: true, install: true) {
-        section ("Name your BWA Spa Device") {
-            input(name: "spaParentDeviceName", type: "text", title: "Spa Parent Device Name:", required: false, defaultValue: state.spa["deviceDisplayName"], description: state.spa["deviceDisplayName"])
+def mainPage() {
+        def spas = [:]
+        // Get spas if we don't have them already
+        if ((state.spas?.size()?:0) == 0 && state.token?.trim()) {
+            getSpas()
         }
-        section("Found the following devices attached to your hot tub") {
-            spaConfiguration.each { k, v ->
-                if (v == true) {
-                    paragraph("    ${k}")
+        logMessage(3, state.spas)
+        if (state.spas) {
+            spas = state.spas
+            spas.sort { it.value }
+        }
+            
+        dynamicPage(name: "mainPage", install: true, uninstall: true) {
+            if (spas) {
+                section("Select which Spas to use:") {
+                    input(name: "spas", type: "enum", title: "Spas", required: false, multiple: true, options: spas)
+                }
+                section("How frequently do you want to poll the BWA cloud for changes? (Use a lower number if you care about trying to capture and respond to \"change\" events as they happen)") {
+                    input(name: "pollingInterval", title: "Polling Interval (in Minutes)", type: "enum", required: false, multiple: false, defaultValue: 5, description: "5", options: ["1", "5", "10", "15", "30"])
                 }
             }
-        }
-    }
-}
-
-def mainPage() {
-    // Get spa if we don't have it already
-    if (state.spa == null && state.token?.trim()) {
-        getSpa()
-    }
-            
-    dynamicPage(name: "mainPage", nextPage: "confirmPage", uninstall: false, install: false) {
-        if (state.spa) {
-            section("Found the following Spa (you can change the device name in the next step):") {
-                paragraph("${state.spa["deviceDisplayName"]}")
+            section("BWA Authentication") {
+                href("authPage", title: "Cloud Authorization", description: "${state.credentialStatus ? state.credentialStatus+"\n" : ""}Click to enter BWA credentials")
             }
-            section("How frequently do you want to poll the BWA cloud for changes? (Use a lower number if you care about trying to capture and respond to \"change\" events as they happen)") {
-                input(name: "pollingInterval", title: "Polling Interval (in Minutes)", type: "enum", required: true, multiple: false, defaultValue: 5, options: ["1", "5", "10", "15", "30"])
-            }              
-        }  
-        section("BWA Authentication") {
-            href("authPage", title: "Cloud Authorization", description: "${state.credentialStatus ? state.credentialStatus+"\n" : ""}Click to enter BWA credentials")
+            section ("Name this instance of ${app.name}") {
+                label name: "name", title: "Assign a name", required: false, defaultValue: app.name, description: app.name, submitOnChange: true
+            }
         }
-        section ("Name this instance of ${app.name}") {
-            label name: "name", title: "Assign a name", required: false, defaultValue: app.name, description: app.name, submitOnChange: true
-        }
-    }
 }
 
 def authPage() {
@@ -126,18 +98,16 @@ def authResultPage() {
     logMessage(3, "Attempting login with specified credentials...")
     
     doLogin()
-    logMessage(2, "authResultPage() state.loginResponse: ${state.loginResponse}")
+    logMessage(3, state.loginResponse)
     
     // Check if login was successful
     if (state.token == null) {
-        logMessage(2, "authResultPage() state.token == null")
         dynamicPage(name: "authResultPage", nextPage: "authPage", uninstall: false, install: false) {
             section("${state.loginResponse}") {
                 paragraph ("Please check your credentials and try again.")
             }
         }
     } else {
-        logMessage(2, "authResultPage() state.token != null")
         dynamicPage(name: "authResultPage", nextPage: "mainPage", uninstall: false, install: false) {
             section("${state.loginResponse}") {
                 paragraph ("Please click next to continue setting up your spa.")
@@ -164,14 +134,12 @@ boolean doLogin(){
             state.spas = null
             break
         case 200:
-            logMessage(3, "Successfully logged in.")
             loggedIn = true
             state.loginResponse = "Logged in"
             state.token = resp.data.token
             state.credentialStatus = "[Connected]"
             state.loginDate = toStDateString(new Date())
-            cacheSpaData(resp.data.device)
-            logMessage(3, "Done caching SPA data.")
+            cacheSpas(resp.data.device)
             break
         default:
             logMessage(2, resp.data)
@@ -182,8 +150,7 @@ boolean doLogin(){
             break
     }
 
-    logMessage(2, "loggedIn: ${loggedIn}, resp.status: ${resp.status}")
-    return loggedIn
+    loggedIn
 }
 
 def reAuth() {
@@ -191,21 +158,19 @@ def reAuth() {
         doLogin() // timeout or other issue occurred, try one more time
 }
 
-def getSpa() {
-    logMessage(3, "Getting Spa data from Balboa API...")
+// Get the list of spas (currently a 1:1 relationship with login)
+def getSpas() {
     def data = doCallout("POST", "/users/login", [username: username, password: password]).data
-    return cacheSpaData(data.device)
+    cacheSpas(data.device)
 }
 
-def cacheSpaData(spaData) {
+def cacheSpas(spa) {
     // save in state so we can re-use in settings
-    logMessage(3, "Saving Spa data in the state cache (app.id: ${app.id}, device_id: ${spaData.device_id})...")
-    state.spa = [:]
-    state.spa["appId"] = app.id;
-    state.spa["deviceId"] = spaData.device_id
-    state.spa["deviceNetworkId"] = [app.id, spaData.device_id].join('.')
-    state.spa["deviceDisplayName"] = "Spa " + spaData.device_id[-8..-1]
-    return spaData
+    def spas = [:]
+    spas[[app.id, spa.device_id].join('.')] = "Spa " + spa.device_id[-8..-1]
+    state.spas = spas
+    state.device = spa
+    spa
 }
 
 def doCallout(calloutMethod, urlPath, calloutBody) {
@@ -229,7 +194,7 @@ def doCallout(calloutMethod, urlPath, calloutBody, contentType, queryParams) {
             break
     }
     def params = [
-        uri: BWGAPI_API_URL,
+        uri: "https://bwgapi.balboawater.com/",
         path: "${urlPath}",
         query: queryParams,
         headers: [
@@ -284,24 +249,25 @@ def initialize() {
     // Not sure when tokens expire, but will get a new one every 24 hours just in case by scheduling to reauthorize every day
     if(state.loginDate?.trim()) schedule(parseStDate(state.loginDate), reAuth)
 
-    def delete = getChildDevices().findAll { !state.spa["deviceNetworkId"] }
+    def delete = getChildDevices().findAll { !settings.spas?.contains(it.deviceNetworkId) }
     delete.each {
         deleteChildDevice(it.deviceNetworkId)
     }
-      
+    
     def childDevices = []
-    try {
-        def childDevice = getChildDevice(state.spa["deviceId"])
-        if(!childDevice) {
-            logMessage(4, "Adding device: ${settings.spaParentDeviceName} [${state.spa["deviceId"]}]")
-            childDevice = addChildDevice(NAMESPACE, PARENT_DEVICE_NAME_PREFIX, state.spa["deviceId"], [label: settings.spaParentDeviceName])
-            state.spa["deviceDisplayName"] = settings.spaParentDeviceName
-            childDevice.parseDeviceData(state.spa)
-            childDevice.createChildDevices(state.spaConfiguration)
+    settings.spas.each {deviceId ->
+        try {
+            def childDevice = getChildDevice(deviceId)
+            if(!childDevice) {
+                logMessage(4, "Adding device: ${state.spas[deviceId]} [${deviceId}]")
+                childDevice = addChildDevice("richardpowellus", "BWA Spa", deviceId, [label: state.spas[deviceId]])
+                childDevice.configure()
+                childDevice.parseDeviceData(state.device)
+            }
+            childDevices.add(childDevice)
+        } catch (e) {
+            log.error "Error creating device: ${e}"
         }
-        childDevices.add(childDevice)
-    } catch (e) {
-        log.error "Error creating device: ${e}"
     }
     
     // set up polling only if we have child devices
@@ -315,82 +281,40 @@ def pollChildren() {
     logMessage(3, "polling...")
     def devices = getChildDevices()
     devices.each {
-        def deviceId = it.currentValue("deviceId", true)
-        if (deviceId == null) {
-            logMessage(3, "Error, deviceId was null. Didn't actually poll the server. Retrying...")
-            runIn(1, pollChildren)
-            return
-        }
-        def deviceData = getPanelUpdate(deviceId)
+        def deviceData = getPanelUpdate(it.currentValue("device_id"))
         it.parsePanelData(deviceData)
     }
 }
 
-// Get device configuration
-def getDeviceConfiguration(device_id) {
-    logMessage(3, "Getting device configuration for ${device_id}")
-    def resp = doCallout("POST", "/devices/sci", getXmlRequest(device_id, "DeviceConfiguration"), "xml")
-    return resp.data
-}
-
-// Decode the encoded configuration data received from Balboa
-def ParseDeviceConfigurationData(encodedData) {
-    logMessage(2, "encodedData: '${encodedData}'")
-    byte[] decoded = encodedData.decodeBase64()
-    logMessage(2, "decoded: '${decoded}'")
-    def returnValue = [:]
-
-    returnValue["Pump0"] = (decoded[7] & 128) != 0 ? true : false
-
-    returnValue["Pump1"] = (decoded[4] & 3) != 0 ? true : false
-    returnValue["Pump2"] = (decoded[4] & 12) != 0 ? true : false
-    returnValue["Pump3"] = (decoded[4] & 48) != 0 ? true : false
-    returnValue["Pump4"] = (decoded[4] & 192) != 0 ? true : false
-    
-    returnValue["Pump5"] = (decoded[5] & 3) != 0 ? true : false
-    returnValue["Pump6"] = (decoded[5] & 192) != 0 ? true : false
-    
-    returnValue["Light1"] = (decoded[6] & 3) != 0 ? true : false
-    returnValue["Light2"] = (decoded[6] & 192) != 0 ? true : false
-
-    returnValue["Blower"] = (decoded[7] & 0) != 0 ? true : false
-    
-    returnValue["Aux1"] = (decoded[8] & 1) != 0 ? true : false
-    returnValue["Aux2"] = (decoded[8] & 2) != 0 ? true : false
-    returnValue["Mister"] = (decoded[8] & 16) != 0 ? true : false
-    
-    return returnValue
-}
-
 // Get panel update
 def getPanelUpdate(device_id) {
-    logMessage(3, "Getting panel update for ${device_id}")
+    logMessage(3, "getting panel update for ${device_id}")
     def resp = doCallout("POST", "/devices/sci", getXmlRequest(device_id, "PanelUpdate"), "xml")
-    return resp.data
+    resp.data
 }
 
 def getXmlRequest(deviceId, fileName) {
-    return "<sci_request version=\"1.0\"><file_system cache=\"false\"><targets><device id=\"${deviceId}\"/></targets><commands><get_file path=\"${fileName}.txt\"/></commands></file_system></sci_request>"
+    "<sci_request version=\"1.0\"><file_system cache=\"false\"><targets><device id=\"${deviceId}\"/></targets><commands><get_file path=\"${fileName}.txt\"/></commands></file_system></sci_request>"
 }
 
 def sendCommand(deviceId, targetName, data) {
     logMessage(3, "sending ${targetName}:${data} command for ${deviceId}")
     def resp = doCallout("POST", "/devices/sci", getXmlRequest(deviceId, targetName, data), "xml")
-    return resp.data
+    resp.data
 }
 
 def getXmlRequest(deviceId, targetName, data) {
-    return "<sci_request version=\"1.0\"><data_service><targets><device id=\"${deviceId}\"/></targets><requests><device_request target_name=\"${targetName}\">${data}</device_request></requests></data_service></sci_request>"
+    "<sci_request version=\"1.0\"><data_service><targets><device id=\"${deviceId}\"/></targets><requests><device_request target_name=\"${targetName}\">${data}</device_request></requests></data_service></sci_request>"
 }
 
 def isoFormat() {
-    return "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
+    "yyyy-MM-dd'T'HH:mm:ss.SSSZ"
 }
 
 def toStDateString(date) {
-    return date.format(isoFormat())
+    date.format(isoFormat())
 }
 
 def parseStDate(dateStr) {
-    return dateStr?.trim() ? timeToday(dateStr) : null
+    dateStr?.trim() ? timeToday(dateStr) : null
 }
